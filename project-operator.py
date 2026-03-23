@@ -16,13 +16,21 @@ def _check_rate_limit(response_headers):
     remaining = response_headers.get("X-RateLimit-Remaining")
     retry_after = response_headers.get("Retry-After")
 
-    if retry_after is not None:
-        wait = int(retry_after)
-        print(f"Rate-limited. Retrying after {wait}s …")
-        time.sleep(wait)
-    elif remaining is not None and int(remaining) < 10:
-        print(f"Rate-limit remaining low ({remaining}). Sleeping 1s …")
-        time.sleep(1)
+    try:
+        if retry_after is not None:
+            wait = int(retry_after)
+            print(f"Rate-limited. Retrying after {wait}s …")
+            time.sleep(wait)
+            return
+    except (ValueError, TypeError):
+        pass
+
+    try:
+        if remaining is not None and int(remaining) < 10:
+            print(f"Rate-limit remaining low ({remaining}). Sleeping 1s …")
+            time.sleep(1)
+    except (ValueError, TypeError):
+        pass
 
 def run_graph_query(query, variables=None):
     GITHUB_API_URL = "https://api.github.com/graphql"
