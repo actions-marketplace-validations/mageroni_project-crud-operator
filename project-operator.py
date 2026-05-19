@@ -11,6 +11,27 @@ TOKEN = os.getenv("PROJECT_TOKEN")
 PROJECT_ID = os.getenv("PROJECT_ID")
 OPERATION = os.getenv("OPERATION")
 
+def _check_rate_limit(response_headers):
+    """Sleep only when GitHub rate limit headers indicate we are running low."""
+    remaining = response_headers.get("X-RateLimit-Remaining")
+    retry_after = response_headers.get("Retry-After")
+
+    try:
+        if retry_after is not None:
+            wait = int(retry_after)
+            print(f"Rate-limited. Retrying after {wait}s …")
+            time.sleep(wait)
+            return
+    except (ValueError, TypeError):
+        pass
+
+    try:
+        if remaining is not None and int(remaining) < 10:
+            print(f"Rate-limit remaining low ({remaining}). Sleeping 1s …")
+            time.sleep(1)
+    except (ValueError, TypeError):
+        pass
+
 def run_graph_query(query, variables=None):
     GITHUB_API_URL = "https://api.github.com/graphql"
     HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github.v4+json"}
@@ -18,8 +39,8 @@ def run_graph_query(query, variables=None):
     response.raise_for_status()
     if response.status_code != 200:
         print(f"Error: {response.status_code} - {response.text}")
-        return None
-    return response.json()
+        return None, response.headers
+    return response.json(), response.headers
 
 def get_field_id(field_name):
     query = """
@@ -40,7 +61,7 @@ def get_field_id(field_name):
     }
     """
     variables = {"projectId": PROJECT_ID}
-    response = run_graph_query(query, variables)
+    response, _headers = run_graph_query(query, variables)
 
     try:
         fields = response['data']['node']['fields']['nodes']
@@ -60,7 +81,7 @@ def remove_item(item_id):
     }
     """
     variables = {"input": {"itemId": item_id, "projectId": PROJECT_ID}}
-    response = run_graph_query(mutation, variables)
+    response, _headers = run_graph_query(mutation, variables)
     
     if response is None:
         print("Failed to remove item.")
@@ -107,7 +128,7 @@ def update_custom_field(item_id, field_name, value):
             "value": value
         }
     }
-    response = run_graph_query(mutation, variables)
+    response, _headers = run_graph_query(mutation, variables)
 
     if response is None:
         print("Failed to update custom field.")
@@ -135,7 +156,7 @@ def create_draft_issue(draft_issue):
         }
     }
     
-    response = run_graph_query(mutation, variables)
+    response, _headers = run_graph_query(mutation, variables)
     if response is None:
         print("Failed to create draft issue.")
         return None
@@ -168,7 +189,7 @@ def add_issue_to_project(issue_id):
         }
     }
     
-    response = run_graph_query(mutation, variables)
+    response, _headers = run_graph_query(mutation, variables)
     if response is None:
         print("Failed to add issue to project.")
         return None
@@ -217,8 +238,8 @@ def run_query_paginated(after=None):
         "projectId": PROJECT_ID,
         "after": after
     }
-    response = run_graph_query(query, variables)
-    return response
+    response, headers = run_graph_query(query, variables)
+    return response, headers
 
 def get_all_items():
     all_items = []
@@ -229,7 +250,7 @@ def get_all_items():
     while has_next_page:
         try:
             print(f"Fetching page {page}...")
-            result = run_query_paginated(after)
+            result, headers = run_query_paginated(after)
             
             # Check for errors in the response
             if "errors" in result:
@@ -245,8 +266,9 @@ def get_all_items():
             
             print(f"Retrieved {len(items_data['nodes'])} items")
             
-            # Add a small delay to avoid rate limiting
-            time.sleep(1)
+            # Only delay when rate limit headers indicate pressure
+            if has_next_page:
+                _check_rate_limit(headers)
             page += 1
             
         except Exception as e:
@@ -256,11 +278,38 @@ def get_all_items():
     return all_items
 
 def item_exists(primary_key_value):
-    all_items = get_all_items()
-    for item in all_items:
-        if (item.get('customField') and item['customField'].get('text') == primary_key_value):
-            print(f"Item with {primary_key_value} exists.")
-            return item
+    has_next_page = True
+    after = None
+    page = 1
+
+    while has_next_page:
+        try:
+            print(f"Searching page {page} for item with {primary_key_value}...")
+            result, headers = run_query_paginated(after)
+
+            if "errors" in result:
+                print(f"Errors in response: {result['errors']}")
+                break
+
+            items_data = result["data"]["node"]["items"]
+
+            for item in items_data["nodes"]:
+                if item.get('customField') and item['customField'].get('text') == primary_key_value:
+                    print(f"Item with {primary_key_value} exists.")
+                    return item
+
+            has_next_page = items_data["pageInfo"]["hasNextPage"]
+            after = items_data["pageInfo"]["endCursor"]
+
+            # Only delay when rate limit headers indicate pressure
+            if has_next_page:
+                _check_rate_limit(headers)
+            page += 1
+
+        except Exception as e:
+            print(f"Error occurred: {str(e)}")
+            break
+
     print(f"Item with {primary_key_value} does not exist.")
     return None
 
